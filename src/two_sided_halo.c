@@ -1,4 +1,4 @@
-#include <mpi.h>
+#incl#include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +38,7 @@ int main(int argc, char **argv) {
     parse_args(argc, argv, &nx, &ny, &iters);
     const int nghost = 1;
 
-    // Create a 2-D Cartesian communicator (periodic = false, reorder = true)
+    // Create a 2-D Cartesian communicator (periodic = false)
     int dims[2] = {0, 0};
     MPI_Dims_create(world_size, 2, dims); // choose factors close to square
     int periods[2] = {0, 0};
@@ -79,21 +79,55 @@ int main(int argc, char **argv) {
 
     const int TAG_UPWARD = 0, TAG_DOWNWARD = 1, TAG_LEFTWARD = 2, TAG_RIGHTWARD = 3;
 
-    // --- Timing + iteration loop --------------------------------------------
-    MPI_Barrier(cart);
-    double t0 = MPI_Wtime();
-
-    for (int it = 0; it < iters; ++it) {
+    // --- One halo exchange for correctness check ----------------------------
+    {
         MPI_Request reqs[8]; int rcount = 0;
 
-        // --- Row exchanges (recv then send)
+        // Row exchanges (recv then send)
         MPI_Irecv(top_halo + g.nghost,    g.ny, MPI_DOUBLE, up,   TAG_DOWNWARD, cart, &reqs[rcount++]);
         MPI_Irecv(bottom_halo + g.nghost, g.ny, MPI_DOUBLE, down, TAG_UPWARD,   cart, &reqs[rcount++]);
 
         MPI_Isend(top_interior + g.nghost,    g.ny, MPI_DOUBLE, up,   TAG_UPWARD,   cart, &reqs[rcount++]);
         MPI_Isend(bottom_interior + g.nghost, g.ny, MPI_DOUBLE, down, TAG_DOWNWARD, cart, &reqs[rcount++]);
 
-        // --- Column exchanges (recv then send), using vector datatype
+        // Column exchanges (recv then send)
+        MPI_Irecv(left_halo_start,  1, col_type, left,  TAG_RIGHTWARD, cart, &reqs[rcount++]);
+        MPI_Irecv(right_halo_start, 1, col_type, right, TAG_LEFTWARD,  cart, &reqs[rcount++]);
+
+        MPI_Isend(left_interior_start,  1, col_type, left,  TAG_LEFTWARD,  cart, &reqs[rcount++]);
+        MPI_Isend(right_interior_start, 1, col_type, right, TAG_RIGHTWARD, cart, &reqs[rcount++]);
+
+        MPI_Waitall(rcount, reqs, MPI_STATUSES_IGNORE);
+
+        int ok_rows = grid_verify_row_halos(&g, up, down);
+        int ok_cols = grid_verify_col_halos(&g, left, right);
+        int ok = ok_rows && ok_cols;
+        int all_ok = 0;
+        MPI_Allreduce(&ok, &all_ok, 1, MPI_INT, MPI_MIN, cart);
+
+        if (rank == 0) {
+            if (all_ok)
+                printf("[two_sided_halo] halo correctness: PASS (rows+cols)\n");
+            else
+                printf("[two_sided_halo] halo correctness: FAIL\n");
+        }
+    }
+
+    // --- Timing + iteration loop (performance only) -------------------------
+    MPI_Barrier(cart);
+    double t0 = MPI_Wtime();
+
+    for (int it = 0; it < iters; ++it) {
+        MPI_Request reqs[8]; int rcount = 0;
+
+        // Row exchanges (recv then send)
+        MPI_Irecv(top_halo + g.nghost,    g.ny, MPI_DOUBLE, up,   TAG_DOWNWARD, cart, &reqs[rcount++]);
+        MPI_Irecv(bottom_halo + g.nghost, g.ny, MPI_DOUBLE, down, TAG_UPWARD,   cart, &reqs[rcount++]);
+
+        MPI_Isend(top_interior + g.nghost,    g.ny, MPI_DOUBLE, up,   TAG_UPWARD,   cart, &reqs[rcount++]);
+        MPI_Isend(bottom_interior + g.nghost, g.ny, MPI_DOUBLE, down, TAG_DOWNWARD, cart, &reqs[rcount++]);
+
+        // Column exchanges (recv then send), using vector datatype
         MPI_Irecv(left_halo_start,  1, col_type, left,  TAG_RIGHTWARD, cart, &reqs[rcount++]);
         MPI_Irecv(right_halo_start, 1, col_type, right, TAG_LEFTWARD,  cart, &reqs[rcount++]);
 
@@ -120,17 +154,6 @@ int main(int argc, char **argv) {
     if (rank == 0) {
         printf("[two_sided_halo] dims=(%d,%d) iters=%d time_min=%.6f time_avg=%.6f time_max=%.6f\n",
                dims[0], dims[1], iters, minT, sumT/(double)(dims[0]*dims[1]), maxT);
-    }
-
-    // Final sanity check after the last exchange/iteration
-    int ok_rows = grid_verify_row_halos(&g, up, down);
-    int ok_cols = grid_verify_col_halos(&g, left, right);
-    int ok = ok_rows && ok_cols;
-    int all_ok = 0;
-    MPI_Allreduce(&ok, &all_ok, 1, MPI_INT, MPI_MIN, cart);
-    if (rank == 0) {
-        if (all_ok) printf("[two_sided_halo] PASS (rows+cols)\n");
-        else        printf("[two_sided_halo] FAIL\n");
     }
 
     // Cleanup

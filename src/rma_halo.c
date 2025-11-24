@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
     MPI_Aint nbytes = (MPI_Aint)((size_t)(g.nx + 2*g.nghost) * (size_t)g.pitch * sizeof(double));
     MPI_Win_create(g.data, nbytes, sizeof(double), MPI_INFO_NULL, cart, &win);
 
-    // --- Row halos via contiguous MPI_Get ---
+    // Row halos via contiguous MPI_Get
     double *top_halo    = grid_rowptr(&g, 0);
     double *bottom_halo = grid_rowptr(&g, g.nghost + g.nx);
 
@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
     MPI_Aint up_src_disp   = (up   < 0) ? 0 : (MPI_Aint)((MPI_Aint)up_src_row   * (MPI_Aint)pitch + (MPI_Aint)nghost);
     MPI_Aint down_src_disp = (down < 0) ? 0 : (MPI_Aint)((MPI_Aint)down_src_row * (MPI_Aint)pitch + (MPI_Aint)nghost);
 
-    // --- Column halos via vector datatypes and MPI_Get ---
+    // Column halos via vector datatypes and MPI_Get
     MPI_Datatype col_type;
     MPI_Type_vector(g.nx, 1, g.pitch, MPI_DOUBLE, &col_type);
     MPI_Type_commit(&col_type);
@@ -83,11 +83,52 @@ int main(int argc, char **argv) {
     double *left_halo_start   = &g.data[grid_index(&g, g.nghost, 0)];
     double *right_halo_start  = &g.data[grid_index(&g, g.nghost, g.nghost + g.ny)];
 
-    // target displacements (in 'double' units) to neighbor interior columns
     MPI_Aint left_src_disp  = (left  < 0) ? 0 : (MPI_Aint)((MPI_Aint)g.nghost * (MPI_Aint)g.pitch + (MPI_Aint)(g.nghost + g.ny - 1));
     MPI_Aint right_src_disp = (right < 0) ? 0 : (MPI_Aint)((MPI_Aint)g.nghost * (MPI_Aint)g.pitch + (MPI_Aint)g.nghost);
 
-    // --- Timing + iteration loop --------------------------------------------
+    // --- One RMA halo exchange for correctness check ------------------------
+    {
+        // Rows
+        if (up   >= 0) MPI_Win_lock(MPI_LOCK_SHARED, up,   0, win);
+        if (down >= 0) MPI_Win_lock(MPI_LOCK_SHARED, down, 0, win);
+
+        if (up   >= 0) MPI_Get(top_halo + g.nghost,    g.ny, MPI_DOUBLE, up,   up_src_disp,   g.ny, MPI_DOUBLE, win);
+        if (down >= 0) MPI_Get(bottom_halo + g.nghost, g.ny, MPI_DOUBLE, down, down_src_disp, g.ny, MPI_DOUBLE, win);
+
+        if (up   >= 0) MPI_Win_flush(up, win);
+        if (down >= 0) MPI_Win_flush(down, win);
+
+        if (up   >= 0) MPI_Win_unlock(up, win);
+        if (down >= 0) MPI_Win_unlock(down, win);
+
+        // Columns
+        if (left  >= 0) MPI_Win_lock(MPI_LOCK_SHARED, left,  0, win);
+        if (right >= 0) MPI_Win_lock(MPI_LOCK_SHARED, right, 0, win);
+
+        if (left  >= 0) MPI_Get(left_halo_start,  1, col_type, left,  left_src_disp,  1, col_type, win);
+        if (right >= 0) MPI_Get(right_halo_start, 1, col_type, right, right_src_disp, 1, col_type, win);
+
+        if (left  >= 0) MPI_Win_flush(left, win);
+        if (right >= 0) MPI_Win_flush(right, win);
+
+        if (left  >= 0) MPI_Win_unlock(left, win);
+        if (right >= 0) MPI_Win_unlock(right, win);
+
+        int ok_rows = grid_verify_row_halos(&g, up, down);
+        int ok_cols = grid_verify_col_halos(&g, left, right);
+        int ok = ok_rows && ok_cols;
+        int all_ok = 0;
+        MPI_Allreduce(&ok, &all_ok, 1, MPI_INT, MPI_MIN, cart);
+
+        if (rank == 0) {
+            if (all_ok)
+                printf("[rma_halo] halo correctness: PASS (rows+cols via MPI_Get)\n");
+            else
+                printf("[rma_halo] halo correctness: FAIL\n");
+        }
+    }
+
+    // --- Timing + iteration loop (performance only) -------------------------
     MPI_Barrier(cart);
     double t0 = MPI_Wtime();
 
@@ -134,17 +175,6 @@ int main(int argc, char **argv) {
     if (rank == 0) {
         printf("[rma_halo] dims=(%d,%d) iters=%d time_min=%.6f time_avg=%.6f time_max=%.6f\n",
                dims[0], dims[1], iters, minT, sumT/(double)(dims[0]*dims[1]), maxT);
-    }
-
-    // Final sanity check
-    int ok_rows = grid_verify_row_halos(&g, up, down);
-    int ok_cols = grid_verify_col_halos(&g, left, right);
-    int ok = ok_rows && ok_cols;
-    int all_ok = 0;
-    MPI_Allreduce(&ok, &all_ok, 1, MPI_INT, MPI_MIN, cart);
-    if (rank == 0) {
-        if (all_ok) printf("[rma_halo] PASS (rows+cols via MPI_Get)\n");
-        else        printf("[rma_halo] FAIL\n");
     }
 
     // Cleanup
