@@ -45,3 +45,7 @@ build
 
 # Mac specific
 *.swp
+!src/**
+!src/*.c
+!src/*.h
+!CMakeLists.txt
