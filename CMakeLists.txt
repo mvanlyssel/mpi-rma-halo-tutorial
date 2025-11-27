@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.12)
 project(mpi_rma_halo_tutorial C)
 
-# Find MPI (C interface)
 find_package(MPI REQUIRED C)
 
 set(CMAKE_C_STANDARD 99)
@@ -25,6 +24,14 @@ target_link_libraries(two_sided_halo
 # RMA halo executable
 add_executable(rma_halo src/rma_halo.c)
 target_link_libraries(rma_halo
+    PRIVATE
+        grid
+        MPI::MPI_C
+)
+
+# Unit tests executable
+add_executable(grid_unit_tests src/tests/unit_tests.c)
+target_link_libraries(grid_unit_tests
     PRIVATE
         grid
         MPI::MPI_C
